@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Subset a BDF font to only the glyphs we actually use.
+
+Usage: subset-font fonts/6x10.bdf fonts/usage-ui.bdf
+"""
+
+import sys
+
+# All characters rendered by the usage dashboard:
+#   ASCII 32-126 (printable), plus the two bar block chars
+KEEP = set(range(32, 127)) | {
+    0x2588,  # █ full block
+    0x2591,  # ░ light shade
+}
+
+def subset_bdf(src, dst):
+    with open(src) as f:
+        lines = f.readlines()
+
+    out = []
+    in_char = False
+    keep_char = False
+    char_lines = []
+    kept = 0
+    total = 0
+
+    for line in lines:
+        stripped = line.rstrip()
+
+        if stripped.startswith("STARTCHAR"):
+            in_char = True
+            keep_char = False
+            char_lines = [line]
+        elif in_char:
+            char_lines.append(line)
+            if stripped.startswith("ENCODING"):
+                enc = int(stripped.split()[1])
+                total += 1
+                keep_char = enc in KEEP
+            elif stripped == "ENDCHAR":
+                in_char = False
+                if keep_char:
+                    out.extend(char_lines)
+                    kept += 1
+                char_lines = []
+        else:
+            # Header lines — update CHARS count when we hit it
+            if stripped.startswith("CHARS "):
+                pass  # will write later
+            else:
+                out.append(line)
+
+    # Find where to insert the corrected CHARS line
+    final = []
+    for line in out:
+        if line.rstrip().startswith("CHARS "):
+            final.append(f"CHARS {kept}\n")
+        else:
+            final.append(line)
+    final.extend(out[out.index(next(l for l in out if "STARTCHAR" in l)):] if False else [])
+
+    # Simpler: rebuild properly
+    header = []
+    body = []
+    in_body = False
+    for line in out:
+        if "STARTCHAR" in line:
+            in_body = True
+        if in_body:
+            body.append(line)
+        else:
+            if line.rstrip().startswith("CHARS "):
+                header.append(f"CHARS {kept}\n")
+            else:
+                header.append(line)
+
+    with open(dst, "w") as f:
+        f.writelines(header)
+        f.writelines(body)
+
+    print(f"Kept {kept}/{total} glyphs  ({src} → {dst})")
+    import os
+    src_kb = os.path.getsize(src) // 1024
+    dst_kb = os.path.getsize(dst) // 1024
+    print(f"Size: {src_kb}KB → {dst_kb}KB ({100*dst_kb//src_kb}%)")
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print(__doc__)
+        sys.exit(1)
+    subset_bdf(sys.argv[1], sys.argv[2])
