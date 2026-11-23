@@ -72,6 +72,25 @@ _codex_token_cache = {"access_token": "", "account_id": "", "at": 0.0, "mtime": 
 _codex_usage_cache = {"body": b"", "dict": None, "at": 0.0}
 
 
+# ── OpenCode Go configuration ─────────────────────────────────────────────────
+_OPENCODE_GO_KEY_ENV = "OPENCODE_GO_API_KEY"
+_OPENCODE_GO_KEYCHAIN_SERVICE = os.environ.get("OPENCODE_GO_KEYCHAIN_SERVICE", "PyPortal-opencode-go")
+_OPENCODE_GO_KEYCHAIN_ACCOUNT = os.environ.get("OPENCODE_GO_KEYCHAIN_ACCOUNT", getpass.getuser())
+_OPENCODE_GO_KEYCHAIN_PATH = os.environ.get("OPENCODE_GO_KEYCHAIN_PATH", "")
+_OPENCODE_GO_AUTH_PATH = Path(
+    os.environ.get("OPENCODE_AUTH_PATH", str(Path.home() / ".local" / "share" / "opencode" / "auth.json"))
+)
+_OPENCODE_GO_USAGE_URL = "https://opencode.ai/inference/go/v1/usage"
+
+_OPENCODE_GO_TOKEN_TTL = 300   # check auth.json every 5 minutes (or on mtime change)
+_OPENCODE_GO_USAGE_TTL = 900   # cache OpenCode Go response for 15 minutes
+_OPENCODE_GO_TIMEOUT   = 10    # keep single-threaded /all-usage responsive
+_OPENCODE_GO_AUTH_COOLDOWN = 300
+
+_opencode_go_token_cache = {"api_key": "", "at": 0.0, "mtime": 0.0}
+_opencode_go_usage_cache = {"body": b"", "dict": None, "at": 0.0, "cooldown_until": 0.0, "last_error_status": 0}
+
+
 # ── Claude helpers ────────────────────────────────────────────────────────────
 
 def _get_claude_token(force=False):
@@ -454,6 +473,203 @@ def _fetch_codex_usage():
     return 200, {}, body, parsed
 
 
+# ── OpenCode Go helpers ───────────────────────────────────────────────────────
+
+def _read_opencode_go_keychain():
+    if not shutil.which("security"):
+        return ""
+    try:
+        command = [
+            "security", "find-generic-password",
+            "-a", _OPENCODE_GO_KEYCHAIN_ACCOUNT,
+            "-s", _OPENCODE_GO_KEYCHAIN_SERVICE,
+            "-w",
+        ]
+        if _OPENCODE_GO_KEYCHAIN_PATH:
+            command.append(_OPENCODE_GO_KEYCHAIN_PATH)
+        return subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return ""
+
+
+def _get_opencode_go_key(force=False):
+    now = time.monotonic()
+    env_key = os.environ.get(_OPENCODE_GO_KEY_ENV, "").strip()
+    if env_key:
+        if env_key != _opencode_go_token_cache["api_key"]:
+            _opencode_go_usage_cache["cooldown_until"] = 0.0
+        _opencode_go_token_cache["api_key"] = env_key
+        _opencode_go_token_cache["at"] = now
+        return env_key
+
+    mtime = 0.0
+    if _OPENCODE_GO_AUTH_PATH.exists():
+        try:
+            mtime = _OPENCODE_GO_AUTH_PATH.stat().st_mtime
+        except Exception:
+            pass
+
+    if (
+        not force
+        and _opencode_go_token_cache["api_key"]
+        and mtime == _opencode_go_token_cache["mtime"]
+        and now - _opencode_go_token_cache["at"] < _OPENCODE_GO_TOKEN_TTL
+    ):
+        return _opencode_go_token_cache["api_key"]
+
+    api_key = _read_opencode_go_keychain()
+    if not api_key:
+        try:
+            if _OPENCODE_GO_AUTH_PATH.exists():
+                data = json.loads(_OPENCODE_GO_AUTH_PATH.read_text())
+                entry = data.get("opencode-go") if isinstance(data, dict) else None
+                if isinstance(entry, dict):
+                    api_key = str(entry.get("key") or "").strip()
+        except Exception as e:
+            print(f"OpenCode Go auth file read error: {e}", flush=True)
+
+    if api_key and api_key != _opencode_go_token_cache["api_key"]:
+        _opencode_go_usage_cache["cooldown_until"] = 0.0
+
+    _opencode_go_token_cache["api_key"] = api_key
+    _opencode_go_token_cache["mtime"] = mtime
+    _opencode_go_token_cache["at"] = now
+    return api_key
+
+
+def _fetch_opencode_go(api_key):
+    r = requests.get(
+        _OPENCODE_GO_USAGE_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "User-Agent": "pyportal-usage-proxy/1.0",
+        },
+        timeout=_OPENCODE_GO_TIMEOUT,
+    )
+    return r.status_code, r.headers, r.content
+
+
+def _build_opencode_go_dict(raw):
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("Expected JSON object")
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else data
+    if not any(isinstance(usage.get(k), dict) for k in ("rolling", "weekly", "monthly")):
+        raise ValueError("Missing OpenCode Go usage windows")
+
+    def _window(name):
+        w = usage.get(name)
+        if not isinstance(w, dict):
+            return None, 0, ""
+        pct = w.get("percent")
+        pct = None if pct is None else max(0, min(100, round(pct)))
+        resets_in = _resets_in(w.get("resetsAt") or w.get("resets_at"))
+        status = str(w.get("status") or "").lower()
+        return pct, resets_in, status
+
+    five_h, five_h_reset, five_h_status = _window("rolling")
+    seven_d, seven_d_reset, seven_d_status = _window("weekly")
+    monthly, monthly_reset, monthly_status = _window("monthly")
+    limit_reached = any(s == "rate-limited" for s in (five_h_status, seven_d_status, monthly_status))
+
+    return {
+        "five_h": five_h,
+        "five_h_resets_in": five_h_reset,
+        "five_h_status": five_h_status,
+        "seven_d": seven_d,
+        "seven_d_resets_in": seven_d_reset,
+        "seven_d_status": seven_d_status,
+        "monthly": monthly,
+        "monthly_resets_in": monthly_reset,
+        "monthly_status": monthly_status,
+        "limit_reached": limit_reached,
+        "observed_at": int(time.time()),
+    }
+
+
+def _retry_after_seconds(headers, default=_OPENCODE_GO_USAGE_TTL):
+    raw = (headers or {}).get("Retry-After", "")
+    try:
+        secs = int(str(raw).strip())
+        if secs > 0:
+            return secs
+    except (ValueError, TypeError):
+        pass
+    return default
+
+
+def _fetch_opencode_go_usage():
+    """Fetch OpenCode Go usage, update cache, and return (status, headers, body_bytes, parsed_dict)."""
+    now = time.monotonic()
+    if _opencode_go_usage_cache["body"] and now - _opencode_go_usage_cache["at"] < _OPENCODE_GO_USAGE_TTL:
+        return 200, {}, _opencode_go_usage_cache["body"], _opencode_go_usage_cache["dict"]
+
+    api_key = _get_opencode_go_key()
+    if not api_key:
+        if _opencode_go_usage_cache["body"]:
+            return 200, {}, _opencode_go_usage_cache["body"], _opencode_go_usage_cache["dict"]
+        return 503, {}, json.dumps({"error": "Could not read OpenCode Go API key"}).encode(), None
+
+    if now < _opencode_go_usage_cache["cooldown_until"]:
+        if _opencode_go_usage_cache["body"]:
+            return 200, {}, _opencode_go_usage_cache["body"], _opencode_go_usage_cache["dict"]
+        err_status = _opencode_go_usage_cache["last_error_status"] or 429
+        return err_status, {}, json.dumps({"error": f"OpenCode Go cooldown ({err_status})"}).encode(), None
+
+    try:
+        status, headers, raw = _fetch_opencode_go(api_key)
+    except Exception as e:
+        print(f"OpenCode Go fetch error: {e}", flush=True)
+        if _opencode_go_usage_cache["body"]:
+            return 200, {}, _opencode_go_usage_cache["body"], _opencode_go_usage_cache["dict"]
+        return 502, {}, json.dumps({"error": "OpenCode Go network error"}).encode(), None
+
+    if status == 401:
+        refreshed_key = _get_opencode_go_key(force=True)
+        if refreshed_key and refreshed_key != api_key:
+            try:
+                status, headers, raw = _fetch_opencode_go(refreshed_key)
+            except Exception as e:
+                print(f"OpenCode Go retry fetch error: {e}", flush=True)
+                if _opencode_go_usage_cache["body"]:
+                    return 200, {}, _opencode_go_usage_cache["body"], _opencode_go_usage_cache["dict"]
+                return 502, {}, json.dumps({"error": "OpenCode Go network error after key refresh"}).encode(), None
+
+    if status in (401, 403):
+        _opencode_go_usage_cache["cooldown_until"] = now + _OPENCODE_GO_AUTH_COOLDOWN
+        _opencode_go_usage_cache["last_error_status"] = status
+        return status, {}, json.dumps({"error": f"OpenCode Go auth error ({status})"}).encode(), None
+
+    if status == 429:
+        retry_after = headers.get("Retry-After", "")
+        _opencode_go_usage_cache["cooldown_until"] = now + _retry_after_seconds(headers)
+        _opencode_go_usage_cache["last_error_status"] = 429
+        body = raw or json.dumps({"error": "rate_limited"}).encode()
+        return 429, ({"Retry-After": retry_after} if retry_after else {}), body, None
+
+    if status != 200 or not raw:
+        if _opencode_go_usage_cache["body"]:
+            return 200, {}, _opencode_go_usage_cache["body"], _opencode_go_usage_cache["dict"]
+        return 502, {}, json.dumps({"error": f"OpenCode Go upstream {status}"}).encode(), None
+
+    try:
+        parsed = _build_opencode_go_dict(raw)
+        body = json.dumps(parsed).encode()
+    except Exception as e:
+        print(f"OpenCode Go parse error: {e}", flush=True)
+        if _opencode_go_usage_cache["body"]:
+            return 200, {}, _opencode_go_usage_cache["body"], _opencode_go_usage_cache["dict"]
+        return 502, {}, json.dumps({"error": "Bad upstream response from OpenCode Go"}).encode(), None
+
+    _opencode_go_usage_cache["body"] = body
+    _opencode_go_usage_cache["dict"] = parsed
+    _opencode_go_usage_cache["at"] = now
+    _opencode_go_usage_cache["cooldown_until"] = 0.0
+    _opencode_go_usage_cache["last_error_status"] = 0
+    return 200, {}, body, parsed
+
+
 # ── HTTP Request Handler ──────────────────────────────────────────────────────
 
 class Handler(BaseHTTPRequestHandler):
@@ -464,6 +680,8 @@ class Handler(BaseHTTPRequestHandler):
             self._claude_usage()
         elif self.path == "/codex-usage":
             self._codex_usage()
+        elif self.path == "/opencode-go-usage":
+            self._opencode_go_usage()
         elif self.path == "/all-usage":
             self._all_usage()
         else:
@@ -473,9 +691,14 @@ class Handler(BaseHTTPRequestHandler):
         now = time.monotonic()
         claude_age = int(now - _claude_usage_cache["at"]) if _claude_usage_cache["body"] else -1
         codex_age = int(now - _codex_usage_cache["at"]) if _codex_usage_cache["body"] else -1
+        opencode_go_age = int(now - _opencode_go_usage_cache["at"]) if _opencode_go_usage_cache["body"] else -1
         self._json(200, {
             "ok": True,
-            "has_token": bool(_claude_token_cache["token"] or _codex_token_cache["access_token"]),
+            "has_token": bool(
+                _claude_token_cache["token"]
+                or _codex_token_cache["access_token"]
+                or _opencode_go_token_cache["api_key"]
+            ),
             "cache_age_s": claude_age,
             "claude": {
                 "has_token": bool(_claude_token_cache["token"]),
@@ -484,6 +707,10 @@ class Handler(BaseHTTPRequestHandler):
             "codex": {
                 "has_token": bool(_codex_token_cache["access_token"]),
                 "cache_age_s": codex_age,
+            },
+            "opencode_go": {
+                "has_token": bool(_opencode_go_token_cache["api_key"]),
+                "cache_age_s": opencode_go_age,
             },
         })
 
@@ -495,14 +722,20 @@ class Handler(BaseHTTPRequestHandler):
         status, headers, body, _ = _fetch_codex_usage()
         self._respond(status, body, headers=headers)
 
+    def _opencode_go_usage(self):
+        status, headers, body, _ = _fetch_opencode_go_usage()
+        self._respond(status, body, headers=headers)
+
     def _all_usage(self):
-        # Fetch both (respecting their respective caches)
+        # Fetch all configured providers (respecting their respective caches)
         c_status, _, c_body, c_dict = _fetch_claude_usage()
         x_status, _, x_body, x_dict = _fetch_codex_usage()
+        g_status, _, g_body, g_dict = _fetch_opencode_go_usage()
 
         combined = {
             "claude": c_dict if c_status == 200 else {"error": c_status},
             "codex":  x_dict if x_status == 200 else {"error": x_status},
+            "opencode_go": g_dict if g_status == 200 else {"error": g_status},
             "updated_at": int(time.time()),
         }
         self._json(200, combined)
@@ -525,7 +758,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    _get_claude_token()  # warm Claude token cache
-    _get_codex_token()   # warm Codex token cache
+    _get_claude_token()     # warm Claude token cache
+    _get_codex_token()      # warm Codex token cache
+    _get_opencode_go_key()  # warm OpenCode Go key cache
     print(f"PyPortal usage proxy listening on {BIND_HOST}:{PORT}", flush=True)
     HTTPServer((BIND_HOST, PORT), Handler).serve_forever()

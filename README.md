@@ -1,7 +1,7 @@
 # PyPortal AI Usage
 
-A tiny always-on dashboard for Claude Code and Codex usage, built for the
-[Adafruit PyPortal](https://www.adafruit.com/product/4116).
+A tiny always-on dashboard for Claude Code, Codex, and OpenCode Go usage, built
+for the [Adafruit PyPortal](https://www.adafruit.com/product/4116).
 
 ![Two PyPortal devices showing Claude and Codex usage](docs/mockups/pyportal-ai-usage-hero.png)
 
@@ -18,8 +18,8 @@ data, and exposes only normalized utilization values to the display.
 
 ```text
 Claude Code credentials ─┐
-                         ├─> local usage proxy ─> PyPortal display
-Codex auth.json ─────────┘
+Codex auth.json ─────────┼─> local usage proxy ─> PyPortal display
+OpenCode Go API key ─────┘
 ```
 
 The proxy caches upstream responses for 15 minutes and the device keeps its last
@@ -36,7 +36,7 @@ temporary network failures.
 - Adafruit PyPortal running CircuitPython
 - A computer on the same trusted network as the device
 - Python 3.11 or newer
-- Claude Code and/or Codex signed in on that computer
+- Claude Code, Codex, and/or OpenCode Go configured on that computer
 - `mpremote` for USB deployment
 
 The checked-in `devenv` configuration provides Python, `mpremote`, `circup`, and
@@ -103,6 +103,13 @@ Claude lookup order:
 Codex defaults to `$CODEX_HOME/auth.json`, with `CODEX_HOME` defaulting to
 `~/.codex`. Set `CODEX_AUTH_PATH` to override the full path.
 
+OpenCode Go lookup order:
+
+1. `$OPENCODE_GO_API_KEY`.
+2. The macOS `PyPortal-opencode-go` Keychain item for the current user.
+3. `$OPENCODE_AUTH_PATH`, defaulting to `~/.local/share/opencode/auth.json`
+   (`opencode-go.key`).
+
 Optional proxy settings:
 
 | Variable | Default | Purpose |
@@ -114,6 +121,11 @@ Optional proxy settings:
 | `CLAUDE_KEYCHAIN_PATH` | system default | Optional macOS keychain path |
 | `CLAUDE_AUTH_PATH` | see above | Claude credential file |
 | `CODEX_AUTH_PATH` | see above | Codex credential file |
+| `OPENCODE_GO_API_KEY` | unset | OpenCode Go API key override |
+| `OPENCODE_GO_KEYCHAIN_SERVICE` | `PyPortal-opencode-go` | macOS Keychain service |
+| `OPENCODE_GO_KEYCHAIN_ACCOUNT` | current user | macOS Keychain account |
+| `OPENCODE_GO_KEYCHAIN_PATH` | system default | Optional macOS keychain path |
+| `OPENCODE_AUTH_PATH` | see above | OpenCode auth file |
 | `USAGE_DASHBOARD_STATE_PATH` | XDG state directory | Codex daily baseline file |
 
 ## Local API
@@ -123,6 +135,7 @@ Optional proxy settings:
 | `GET /health` | Credential availability and cache ages |
 | `GET /claude-usage` | Normalized Claude usage |
 | `GET /codex-usage` | Normalized Codex usage |
+| `GET /opencode-go-usage` | Normalized OpenCode Go usage |
 | `GET /all-usage` | Combined payload used by the device |
 
 The proxy does not expose access tokens, refresh tokens, account IDs, or raw

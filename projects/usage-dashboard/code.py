@@ -4,6 +4,7 @@ import time
 import board
 import displayio
 import busio
+import supervisor
 import rtc
 from digitalio import DigitalInOut
 import neopixel
@@ -29,8 +30,14 @@ MANUAL_REFRESH_MIN = 900
 STATE_FILE = "usage_state.json"
 USAGE_RETRY_KEY = "usage_retry_at"
 
-VIEW_CLAUDE = 0
-VIEW_CODEX  = 1
+VIEW_CLAUDE      = 0
+VIEW_CODEX       = 1
+VIEW_OPENCODE_GO = 2
+_VIEW_ORDER = (
+    (VIEW_CLAUDE, "claude"),
+    (VIEW_CODEX, "codex"),
+    (VIEW_OPENCODE_GO, "opencode_go"),
+)
 CAROUSEL_SECS = 60
 
 W, H = 320, 240
@@ -44,6 +51,7 @@ BLACK  = 0x000000
 WHITE  = 0xFFFFFF
 ORANGE = 0xCC6B3D
 TEAL   = 0x10A37F
+BLUE   = 0x3B82F6
 SUB    = 0x666688
 DIM    = 0x333355
 GREEN  = 0x22c55e
@@ -295,12 +303,14 @@ def fetch_usage(req):
             return None
 
         # Unified /all-usage response
-        if "claude" in data or "codex" in data:
+        if "claude" in data or "codex" in data or "opencode_go" in data:
             claude = data.get("claude") if isinstance(data.get("claude"), dict) and "error" not in data.get("claude") else None
             codex  = data.get("codex") if isinstance(data.get("codex"), dict) and "error" not in data.get("codex") else None
+            opencode_go = data.get("opencode_go") if isinstance(data.get("opencode_go"), dict) and "error" not in data.get("opencode_go") else None
             return {
                 "claude": claude,
                 "codex":  codex,
+                "opencode_go": opencode_go,
                 "updated_at": data.get("updated_at", _epoch_now()),
             }
 
@@ -672,25 +682,80 @@ def codex_screen(u, stale=False):
     return g, age_lbl
 
 
+def opencode_go_screen(u, stale=False):
+    g = _base()
+    five_h         = u.get("five_h")
+    five_h_reset   = int(u.get("five_h_resets_in", 0) or 0)
+    five_h_status  = str(u.get("five_h_status") or "").lower()
+    seven_d        = u.get("seven_d")
+    seven_d_reset  = int(u.get("seven_d_resets_in", 0) or 0)
+    seven_d_status = str(u.get("seven_d_status") or "").lower()
+    monthly        = u.get("monthly")
+    monthly_reset  = int(u.get("monthly_resets_in", 0) or 0)
+    monthly_status = str(u.get("monthly_status") or "").lower()
+    limit_reached  = bool(u.get("limit_reached", False))
+
+    age_lbl = _draw_frame(g, title_main="OPENCODE", title_sub="go", color=BLUE, stale=stale)
+
+    Y_R1 = _Y_ROW1
+    Y_R2 = Y_R1 + _ROW_SLOT
+    Y_R3 = Y_R2 + _ROW_SLOT
+    Y_R4 = Y_R3 + _ROW_SLOT
+
+    _bar_label(g, Y_R1, "5h ", five_h, five_h_reset, bar_color(five_h), "LIMIT" if five_h_status == "rate-limited" else None, na=(five_h is None))
+    _bar_label(g, Y_R2, "7d ", seven_d, seven_d_reset, bar_color(seven_d), "LIMIT" if seven_d_status == "rate-limited" else None, na=(seven_d is None))
+    _bar_label(g, Y_R3, "mo ", monthly, monthly_reset, bar_color(monthly), "LIMIT" if monthly_status == "rate-limited" else None, na=(monthly is None))
+
+    status_pct = 100 if limit_reached else 0
+    status_col = RED if limit_reached else GREEN
+    status_sub = "LIMIT REACHED" if limit_reached else "ACTIVE"
+    _bar_label(g, Y_R4, "lim", status_pct, 0, status_col, status_sub)
+
+    return g, age_lbl
+
+
+def _available_views(data):
+    if not isinstance(data, dict):
+        return []
+    return [view for view, key in _VIEW_ORDER if isinstance(data.get(key), dict)]
+
+
+def _next_view(data, current_view):
+    views = _available_views(data)
+    if not views:
+        return current_view
+    if current_view in views:
+        return views[(views.index(current_view) + 1) % len(views)]
+    return views[0]
+
+
 def usage_screen(data, view_mode=VIEW_CLAUDE, stale=False):
     if not data:
         return error_screen("No data"), None
 
-    claude_data = data.get("claude") if isinstance(data, dict) else None
-    codex_data  = data.get("codex")  if isinstance(data, dict) else None
+    claude_data      = data.get("claude") if isinstance(data, dict) else None
+    codex_data       = data.get("codex") if isinstance(data, dict) else None
+    opencode_go_data = data.get("opencode_go") if isinstance(data, dict) else None
 
     # Handle direct/flat dicts
-    if claude_data is None and codex_data is None and isinstance(data, dict):
+    if claude_data is None and codex_data is None and opencode_go_data is None and isinstance(data, dict):
+        if "monthly" in data:
+            return opencode_go_screen(data, stale=stale)
         if "plan" in data:
             return codex_screen(data, stale=stale)
         return claude_screen(data, stale=stale)
 
-    if view_mode == VIEW_CODEX and codex_data:
-        return codex_screen(codex_data, stale=stale)
-    if claude_data:
-        return claude_screen(claude_data, stale=stale)
-    if codex_data:
-        return codex_screen(codex_data, stale=stale)
+    screens = (
+        (VIEW_CLAUDE, claude_data, claude_screen),
+        (VIEW_CODEX, codex_data, codex_screen),
+        (VIEW_OPENCODE_GO, opencode_go_data, opencode_go_screen),
+    )
+    for view, provider_data, renderer in screens:
+        if view_mode == view and isinstance(provider_data, dict):
+            return renderer(provider_data, stale=stale)
+    for _, provider_data, renderer in screens:
+        if isinstance(provider_data, dict):
+            return renderer(provider_data, stale=stale)
 
     return error_screen("No active service"), None
 
@@ -786,11 +851,11 @@ try:
             screen, rate_limit_lbl = rate_limit_screen(int(rate_limit_until - now), last_usage, view_mode=current_view, reason=rate_limit_reason)
             display.root_group = screen
 
-        # Auto-carousel between Claude and Codex views
-        has_both = bool(last_usage and last_usage.get("claude") and last_usage.get("codex"))
-        if has_both and not startup_wait and rate_limit_lbl is None and next_refresh_lbl is None:
+        # Auto-carousel across available provider views
+        has_multiple = len(_available_views(last_usage)) > 1
+        if has_multiple and not startup_wait and rate_limit_lbl is None and next_refresh_lbl is None:
             if now - last_carousel >= CAROUSEL_SECS:
-                current_view = VIEW_CODEX if current_view == VIEW_CLAUDE else VIEW_CLAUDE
+                current_view = _next_view(last_usage, current_view)
                 screen, age_lbl = usage_screen(last_usage, view_mode=current_view, stale=(now - last_refresh >= REFRESH_MIN))
                 display.root_group = screen
                 last_carousel = now
@@ -809,8 +874,8 @@ try:
                     is_manual_refresh = True
                 else:
                     # Tap body = instant view toggle
-                    if has_both:
-                        current_view = VIEW_CODEX if current_view == VIEW_CLAUDE else VIEW_CLAUDE
+                    if has_multiple:
+                        current_view = _next_view(last_usage, current_view)
                         screen, age_lbl = usage_screen(last_usage, view_mode=current_view, stale=(now - last_refresh >= REFRESH_MIN))
                         display.root_group = screen
                         last_carousel = now
