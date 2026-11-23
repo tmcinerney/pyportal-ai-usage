@@ -1,14 +1,15 @@
 """
 PyPortal usage proxy server — serves utilization data to the PyPortal display.
 
-Handles both Claude (Anthropic OAuth) and Codex (ChatGPT OAuth) usage data.
-Reads tokens from the macOS Keychain (Claude) and ~/.codex/auth.json (Codex),
-caches responses for 15 minutes, and serves unified or dedicated endpoints.
+Handles Claude (Anthropic OAuth), Codex (ChatGPT OAuth), and OpenCode Go usage
+data. Reads local credentials for each configured provider, caches responses
+for 15 minutes, and serves unified or dedicated endpoints.
 
-GET /health       → health & cache status
-GET /claude-usage → Claude usage metrics (alias: /usage)
-GET /codex-usage  → Codex usage metrics
-GET /all-usage    → Combined Claude & Codex usage metrics
+GET /health            → health & cache status
+GET /claude-usage      → Claude usage metrics (alias: /usage)
+GET /codex-usage       → Codex usage metrics
+GET /opencode-go-usage → OpenCode Go usage metrics
+GET /all-usage         → Combined Claude, Codex & OpenCode Go usage metrics
 Usage:
     python services/usage-server.py
     PORT=9292 python services/usage-server.py

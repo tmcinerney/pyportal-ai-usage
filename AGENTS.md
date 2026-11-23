@@ -2,8 +2,8 @@
 
 ## Scope
 
-This repository contains one product: a PyPortal dashboard for Claude Code and
-Codex usage. Keep changes within that boundary.
+This repository contains one product: a PyPortal dashboard for Claude Code,
+Codex, and OpenCode Go usage. Keep changes within that boundary.
 
 ## Development
 

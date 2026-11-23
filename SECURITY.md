@@ -7,8 +7,8 @@ stores its Wi-Fi credentials and the proxy URL. Proxy responses contain
 normalized usage values, not tokens or raw provider responses.
 
 `shared/secrets.py` is intentionally ignored. Do not commit it, a copied
-`secrets.py`, Claude or Codex auth files, captured HTTP traffic, or diagnostic
-output containing credentials.
+`secrets.py`, provider auth files or API keys, captured HTTP traffic, or
+diagnostic output containing credentials.
 
 ## Network exposure
 
@@ -20,7 +20,8 @@ interface address. Do not expose it directly to the internet.
 ## Upstream interfaces
 
 The Claude and Codex usage endpoints used here are internal client interfaces,
-not documented public APIs. Their authentication and payload formats may change.
+not documented public APIs (OpenCode Go uses its documented usage API). Their
+authentication and payload formats may change.
 Review upstream changes before updating parsing or credential discovery code.
 
 ## Reporting a vulnerability

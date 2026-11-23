@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions that improve the Claude/Codex usage display, provider parsing,
+Contributions that improve the usage display, provider parsing,
 device reliability, documentation, or tests are welcome.
 
 Before opening a pull request:

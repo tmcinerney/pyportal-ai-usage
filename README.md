@@ -5,16 +5,16 @@ for the [Adafruit PyPortal](https://www.adafruit.com/product/4116).
 
 ![Two PyPortal devices showing Claude and Codex usage](docs/mockups/pyportal-ai-usage-hero.png)
 
-The dashboard alternates between provider views and shows the limits available
-for the signed-in accounts: short-term and weekly utilization, reset times,
-model-scoped Claude limits, Codex reset credits, and observed daily Codex usage.
-Tap the screen to switch views or request a refresh.
+The dashboard cycles between configured provider views and shows the limits
+available for each account: short-term, weekly, and monthly utilization, reset
+times, model-scoped Claude limits, Codex reset credits, and observed daily Codex
+usage. Tap the screen to switch views or request a refresh.
 
 ## How it works
 
-The PyPortal never receives your Claude or Codex tokens. A small host-side proxy
-reads credentials already maintained by Claude Code and Codex, requests usage
-data, and exposes only normalized utilization values to the display.
+The PyPortal never receives your provider tokens or API keys. A small host-side
+proxy reads local credentials for Claude Code, Codex, and OpenCode Go, requests
+usage data, and exposes only normalized utilization values to the display.
 
 ```text
 Claude Code credentials ─┐
@@ -27,9 +27,10 @@ successful response on disk, so the display remains useful during rate limits or
 temporary network failures.
 
 > [!IMPORTANT]
-> This project uses provider endpoints observed in the Claude Code and Codex
-> clients. They are not documented public APIs and may change without notice.
-> This project is not affiliated with Anthropic, OpenAI, or Adafruit.
+> The Claude Code and Codex endpoints are internal client interfaces observed in
+> those clients and may change without notice. OpenCode Go uses its documented
+> usage API. This project is not affiliated with Anthropic, OpenAI, OpenCode, or
+> Adafruit.
 
 ## Requirements
 
@@ -143,7 +144,7 @@ provider responses.
 
 ## Screen layout
 
-The display uses the same visual structure for both providers while adapting to
+The display uses the same visual structure across providers while adapting to
 the data each one exposes.
 
 ![Claude and Codex screen layout](docs/mockups/usage-dashboard-concept.png)
