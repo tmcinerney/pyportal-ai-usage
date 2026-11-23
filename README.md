@@ -3,7 +3,7 @@
 A tiny always-on dashboard for Claude Code, Codex, and OpenCode Go usage, built
 for the [Adafruit PyPortal](https://www.adafruit.com/product/4116).
 
-![Two PyPortal devices showing Claude and Codex usage](docs/mockups/pyportal-ai-usage-hero.png)
+![Three PyPortal devices showing Claude, Codex, and OpenCode Go usage](docs/mockups/pyportal-ai-usage-hero.png)
 
 The dashboard cycles between configured provider views and shows the limits
 available for each account: short-term, weekly, and monthly utilization, reset
