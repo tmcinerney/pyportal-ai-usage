@@ -1024,6 +1024,14 @@ try:
             else:
                 next_refresh_lbl.text = "Next refresh in " + _fmt_wait(wait)
 
+except KeyboardInterrupt:
+    # A stray serial interrupt (port open/close, DTR transition, tooling)
+    # must not exit the app to the REPL. Resume the main loop.
+    print("Serial interrupt ignored; continuing")
+    try:
+        supervisor.reload()
+    except Exception:
+        pass
 except Exception as e:
     print("Fatal:", e)
     try:

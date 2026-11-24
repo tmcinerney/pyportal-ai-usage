@@ -26,6 +26,9 @@ Codex, and OpenCode Go usage. Keep changes within that boundary.
 ## Device behavior
 
 - Poll conservatively and preserve the last successful usage response.
-- Honor rate-limit cooldowns and do not let touch refresh bypass them.
+- Honor rate-limit cooldowns; the header-tap refresh cannot bypass them.
+- Swipe left/right navigates provider views; body taps do nothing.
+- After deploying, run `devenv shell -- verify` and watch through a full
+  refresh cycle before calling the change done (see docs/DEVICE.md).
 - Prefer USB deployment; do not add unauthenticated remote update mechanisms.
 - Treat the provider usage endpoints as unstable internal interfaces.

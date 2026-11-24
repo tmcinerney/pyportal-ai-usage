@@ -140,10 +140,7 @@ Optional proxy settings:
 | `GET /usage/claude` | Normalized Claude usage |
 | `GET /usage/codex` | Normalized Codex usage |
 | `GET /usage/opencode` | Normalized OpenCode Go usage |
-| `GET /usage/health` | Credential availability and cache ages (alias: `/health`) |
-
-Legacy paths (`/claude-usage`, `/codex-usage`, `/opencode-go-usage`,
-`/all-usage`, `/usage`) remain as aliases for compatibility.
+| `GET /health` | Credential availability and cache ages |
 
 The proxy does not expose access tokens, refresh tokens, account IDs, or raw
 provider responses.

@@ -56,6 +56,12 @@ Important: a healthy device prints nothing between 15-minute refresh
 intervals. Serial silence alone is not a failure. Always reload first, then
 look for the boot lines.
 
+A second subtlety: every soft reload resets the device's monotonic clock, so
+the next scheduled fetch is re-derived from the last cached fetch. Repeated
+reloads while debugging can make a healthy device look stalled when it is
+only rescheduling. Judge freshness from `/usage_state.json`
+(`last_success_at`) against the host clock, not from serial silence.
+
 ## Recovery
 
 To recover from a stuck REPL, run `devenv shell -- reload`. This sends Ctrl-C

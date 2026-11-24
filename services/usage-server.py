@@ -11,9 +11,6 @@ GET /usage/codex       → Codex usage metrics
 GET /usage/opencode    → OpenCode Go usage metrics
 GET /usage/all         → Combined Claude, Codex & OpenCode Go usage metrics
 
-Legacy paths (/claude-usage, /codex-usage, /opencode-go-usage, /all-usage,
-/usage) are aliased to the /usage/* equivalents.
-
 Usage:
     python services/usage-server.py
     PORT=9292 python services/usage-server.py
@@ -651,18 +648,18 @@ def _fetch_opencode_go_usage():
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ("/health", "/usage/health"):
+        if self.path == "/health":
             self._health()
-        elif self.path in ("/usage/claude", "/claude-usage", "/usage"):
+        elif self.path in ("/usage/claude",):
             status, headers, body, _ = _fetch_claude_usage()
             self._respond(status, body, headers=headers)
-        elif self.path in ("/usage/codex", "/codex-usage"):
+        elif self.path == "/usage/codex":
             status, headers, body, _ = _fetch_codex_usage()
             self._respond(status, body, headers=headers)
-        elif self.path in ("/usage/opencode", "/opencode-go-usage"):
+        elif self.path == "/usage/opencode":
             status, headers, body, _ = _fetch_opencode_go_usage()
             self._respond(status, body, headers=headers)
-        elif self.path in ("/usage/all", "/all-usage"):
+        elif self.path == "/usage/all":
             self._all_usage()
         else:
             self.send_error(404)
