@@ -9,7 +9,8 @@ Before opening a pull request:
 2. Run `devenv shell -- python -m unittest discover -s tests`.
 3. Compile-check `projects/usage-dashboard/code.py` as documented in the README.
 4. Run `git diff --check`.
-5. Describe any physical-device validation you performed.
+5. Describe any physical-device validation you performed, using the loop in
+   [docs/DEVICE.md](docs/DEVICE.md): `deploy usage-dashboard` then `verify`.
 
 Keep unrelated PyPortal applications and general home-automation tooling in
 separate repositories.

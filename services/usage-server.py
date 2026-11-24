@@ -6,10 +6,14 @@ data. Reads local credentials for each configured provider, caches responses
 for 15 minutes, and serves unified or dedicated endpoints.
 
 GET /health            → health & cache status
-GET /claude-usage      → Claude usage metrics (alias: /usage)
-GET /codex-usage       → Codex usage metrics
-GET /opencode-go-usage → OpenCode Go usage metrics
-GET /all-usage         → Combined Claude, Codex & OpenCode Go usage metrics
+GET /usage/claude      → Claude usage metrics
+GET /usage/codex       → Codex usage metrics
+GET /usage/opencode    → OpenCode Go usage metrics
+GET /usage/all         → Combined Claude, Codex & OpenCode Go usage metrics
+
+Legacy paths (/claude-usage, /codex-usage, /opencode-go-usage, /all-usage,
+/usage) are aliased to the /usage/* equivalents.
+
 Usage:
     python services/usage-server.py
     PORT=9292 python services/usage-server.py
@@ -21,15 +25,22 @@ import os
 import getpass
 import shutil
 import subprocess
+
 import time
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import requests
 
 PORT = int(os.environ.get("PORT", 9292))
 BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")
+
+# Cooldown applied after an auth (401/403) or upstream error, so a polling
+# client cannot hammer the provider while credentials are unavailable.
+_AUTH_COOLDOWN = 300
+# Upper bound for any Retry-After a provider asks us to honor.
+_RETRY_AFTER_CAP = 3600
 
 # ── Claude configuration ──────────────────────────────────────────────────────
 _CLAUDE_KEYCHAIN_SERVICE = os.environ.get("CLAUDE_KEYCHAIN_SERVICE", "Claude Code-credentials")
@@ -47,7 +58,7 @@ _CLAUDE_TOKEN_TTL = 300   # re-read Keychain every 5 minutes
 _CLAUDE_USAGE_TTL = 900   # cache Anthropic response for 15 minutes
 
 _claude_token_cache = {"token": "", "at": 0.0}
-_claude_usage_cache = {"body": b"", "dict": None, "at": 0.0}
+_claude_usage_cache = {"body": b"", "dict": None, "at": 0.0, "cooldown_until": 0.0, "last_error_status": 0}
 
 
 # ── Codex configuration ───────────────────────────────────────────────────────
@@ -70,7 +81,7 @@ _CODEX_HISTORY_PATH = Path(
 )
 
 _codex_token_cache = {"access_token": "", "account_id": "", "at": 0.0, "mtime": 0.0}
-_codex_usage_cache = {"body": b"", "dict": None, "at": 0.0}
+_codex_usage_cache = {"body": b"", "dict": None, "at": 0.0, "cooldown_until": 0.0, "last_error_status": 0}
 
 
 # ── OpenCode Go configuration ─────────────────────────────────────────────────
@@ -86,10 +97,117 @@ _OPENCODE_GO_USAGE_URL = "https://opencode.ai/inference/go/v1/usage"
 _OPENCODE_GO_TOKEN_TTL = 300   # check auth.json every 5 minutes (or on mtime change)
 _OPENCODE_GO_USAGE_TTL = 900   # cache OpenCode Go response for 15 minutes
 _OPENCODE_GO_TIMEOUT   = 10    # keep single-threaded /all-usage responsive
-_OPENCODE_GO_AUTH_COOLDOWN = 300
 
 _opencode_go_token_cache = {"api_key": "", "at": 0.0, "mtime": 0.0}
 _opencode_go_usage_cache = {"body": b"", "dict": None, "at": 0.0, "cooldown_until": 0.0, "last_error_status": 0}
+
+
+# ── Shared fetch pipeline ─────────────────────────────────────────────────────
+# One orchestrator for all providers: cache lookup, credential lookup, upstream
+# fetch with a single 401 retry, cooldown bookkeeping, and stale-serve-on-error.
+
+def _retry_after_seconds(headers, default=900, cap=_RETRY_AFTER_CAP):
+    raw = (headers or {}).get("Retry-After", "")
+    try:
+        secs = int(str(raw).strip())
+        if secs > 0:
+            return min(secs, cap)
+    except (ValueError, TypeError):
+        pass
+    return default
+
+
+def _serve_cached(cache):
+    return 200, {}, cache["body"], cache["dict"]
+
+
+def _fetch_provider_usage(cache, ttl, provider):
+    """Fetch one provider's usage.
+
+    provider is a dict with:
+      name           log prefix
+      get_token      () -> credential, or "" when unavailable
+      refresh_token  (credential) -> credential after an upstream 401
+      fetch          (credential) -> (status, headers, raw)
+      build          (raw) -> normalized dict
+    Returns (status, headers, body_bytes, parsed_dict).
+    """
+    now = time.monotonic()
+    if cache["body"] and now - cache["at"] < ttl:
+        return _serve_cached(cache)
+
+    token = provider["get_token"]()
+    if not token:
+        if cache["body"]:
+            return _serve_cached(cache)
+        return 503, {}, json.dumps({"error": f"Could not read {provider['name']} credentials"}).encode(), None
+
+    if now < cache["cooldown_until"]:
+        if cache["body"]:
+            return _serve_cached(cache)
+        err_status = cache["last_error_status"] or 429
+        return err_status, {}, json.dumps({"error": f"{provider['name']} cooldown ({err_status})"}).encode(), None
+
+    def _try_fetch(tok):
+        try:
+            return provider["fetch"](tok)
+        except Exception as e:
+            print(f"{provider['name']} fetch error: {e}", flush=True)
+            return None
+
+    result = _try_fetch(token)
+    if result is None:
+        if cache["body"]:
+            return _serve_cached(cache)
+        return 502, {}, json.dumps({"error": f"{provider['name']} network error"}).encode(), None
+
+    status, headers, raw = result
+    if status == 401:
+        refreshed = provider["refresh_token"](token)
+        if refreshed and refreshed != token:
+            retried = _try_fetch(refreshed)
+            if retried is None:
+                if cache["body"]:
+                    return _serve_cached(cache)
+                return 502, {}, json.dumps({"error": f"{provider['name']} network error after token refresh"}).encode(), None
+            status, headers, raw = retried
+
+    if status in (401, 403):
+        cache["cooldown_until"] = now + _AUTH_COOLDOWN
+        cache["last_error_status"] = status
+        return status, {}, json.dumps({"error": f"{provider['name']} auth error ({status})"}).encode(), None
+
+    if status == 429:
+        # Never forward the raw upstream body: it may contain account detail.
+        cache["cooldown_until"] = now + _retry_after_seconds(headers, default=ttl)
+        cache["last_error_status"] = 429
+        body = json.dumps({"error": "rate_limited"}).encode()
+        retry_secs = str(_retry_after_seconds(headers, default=ttl))
+        return 429, {"Retry-After": retry_secs}, body, None
+
+    if status != 200 or not raw:
+        cache["cooldown_until"] = now + _AUTH_COOLDOWN
+        cache["last_error_status"] = status
+        if cache["body"]:
+            return _serve_cached(cache)
+        return 502, {}, json.dumps({"error": f"{provider['name']} upstream {status}"}).encode(), None
+
+    try:
+        parsed = provider["build"](raw)
+        body = json.dumps(parsed).encode()
+    except Exception as e:
+        print(f"{provider['name']} parse error: {e}", flush=True)
+        cache["cooldown_until"] = now + _AUTH_COOLDOWN
+        if cache["body"]:
+            return _serve_cached(cache)
+        return 502, {}, json.dumps({"error": f"Bad upstream response from {provider['name']}"}).encode(), None
+
+    cache["body"] = body
+    cache["dict"] = parsed
+    cache["at"] = now
+    cache["cooldown_until"] = 0.0
+    cache["last_error_status"] = 0
+    return 200, {}, body, parsed
 
 
 # ── Claude helpers ────────────────────────────────────────────────────────────
@@ -211,57 +329,17 @@ def _build_claude_dict(raw):
 
 def _fetch_claude_usage():
     """Fetch Claude usage, update cache, and return (status, headers, body_bytes, parsed_dict)."""
-    now = time.monotonic()
-    if _claude_usage_cache["body"] and now - _claude_usage_cache["at"] < _CLAUDE_USAGE_TTL:
-        return 200, {}, _claude_usage_cache["body"], _claude_usage_cache["dict"]
-
-    token = _get_claude_token()
-    if not token:
-        if _claude_usage_cache["body"]:
-            return 200, {}, _claude_usage_cache["body"], _claude_usage_cache["dict"]
-        return 503, {}, json.dumps({"error": "Could not read Claude token from Keychain"}).encode(), None
-
-    try:
-        status, headers, raw = _fetch_claude(token)
-    except Exception as e:
-        print(f"Claude fetch error: {e}", flush=True)
-        if _claude_usage_cache["body"]:
-            return 200, {}, _claude_usage_cache["body"], _claude_usage_cache["dict"]
-        return 502, {}, json.dumps({"error": "Claude network error"}).encode(), None
-
-    if status == 401:
-        token = _get_claude_token(force=True)
-        try:
-            status, headers, raw = _fetch_claude(token)
-        except Exception as e:
-            print(f"Claude retry fetch error: {e}", flush=True)
-            if _claude_usage_cache["body"]:
-                return 200, {}, _claude_usage_cache["body"], _claude_usage_cache["dict"]
-            return 502, {}, json.dumps({"error": "Claude network error after token refresh"}).encode(), None
-
-    if status == 429:
-        retry_after = headers.get("Retry-After", "")
-        body = raw or json.dumps({"error": "rate_limited"}).encode()
-        return 429, ({"Retry-After": retry_after} if retry_after else {}), body, None
-
-    if status != 200 or not raw:
-        if _claude_usage_cache["body"]:
-            return 200, {}, _claude_usage_cache["body"], _claude_usage_cache["dict"]
-        return 502, {}, json.dumps({"error": f"Claude upstream {status}"}).encode(), None
-
-    try:
-        parsed = _build_claude_dict(raw)
-        body = json.dumps(parsed).encode()
-    except Exception as e:
-        print(f"Claude parse error: {e}", flush=True)
-        if _claude_usage_cache["body"]:
-            return 200, {}, _claude_usage_cache["body"], _claude_usage_cache["dict"]
-        return 502, {}, json.dumps({"error": "Bad upstream response from Claude"}).encode(), None
-
-    _claude_usage_cache["body"] = body
-    _claude_usage_cache["dict"] = parsed
-    _claude_usage_cache["at"] = now
-    return 200, {}, body, parsed
+    return _fetch_provider_usage(
+        _claude_usage_cache,
+        _CLAUDE_USAGE_TTL,
+        {
+            "name": "Claude",
+            "get_token": _get_claude_token,
+            "refresh_token": lambda tok: _get_claude_token(force=True),
+            "fetch": _fetch_claude,
+            "build": _build_claude_dict,
+        },
+    )
 
 
 # ── Codex helpers ─────────────────────────────────────────────────────────────
@@ -420,58 +498,23 @@ def _build_codex_dict(raw):
 
 def _fetch_codex_usage():
     """Fetch Codex usage, update cache, and return (status, headers, body_bytes, parsed_dict)."""
-    now = time.monotonic()
-    if _codex_usage_cache["body"] and now - _codex_usage_cache["at"] < _CODEX_USAGE_TTL:
-        return 200, {}, _codex_usage_cache["body"], _codex_usage_cache["dict"]
 
-    token, account_id = _get_codex_token()
-    if not token:
-        if _codex_usage_cache["body"]:
-            return 200, {}, _codex_usage_cache["body"], _codex_usage_cache["dict"]
-        return 503, {}, json.dumps({"error": "Could not read Codex token from auth.json"}).encode(), None
-
-    try:
-        status, headers, raw = _fetch_codex(token, account_id)
-    except Exception as e:
-        print(f"Codex fetch error: {e}", flush=True)
-        if _codex_usage_cache["body"]:
-            return 200, {}, _codex_usage_cache["body"], _codex_usage_cache["dict"]
-        return 502, {}, json.dumps({"error": "Codex network error"}).encode(), None
-
-    if status == 401:
-        token, account_id = _get_codex_token(force=True)
-        try:
-            status, headers, raw = _fetch_codex(token, account_id)
-        except Exception as e:
-            print(f"Codex retry fetch error: {e}", flush=True)
-            if _codex_usage_cache["body"]:
-                return 200, {}, _codex_usage_cache["body"], _codex_usage_cache["dict"]
-            return 502, {}, json.dumps({"error": "Codex network error after token refresh"}).encode(), None
-
-    if status == 429:
-        retry_after = headers.get("Retry-After", "")
-        body = raw or json.dumps({"error": "rate_limited"}).encode()
-        return 429, ({"Retry-After": retry_after} if retry_after else {}), body, None
-
-    if status != 200 or not raw:
-        if _codex_usage_cache["body"]:
-            return 200, {}, _codex_usage_cache["body"], _codex_usage_cache["dict"]
-        return 502, {}, json.dumps({"error": f"Codex upstream {status}"}).encode(), None
-
-    try:
+    def _build_with_daily(raw):
         parsed = _build_codex_dict(raw)
         parsed["daily_points"] = _observe_codex_day(json.loads(raw))
-        body = json.dumps(parsed).encode()
-    except Exception as e:
-        print(f"Codex parse error: {e}", flush=True)
-        if _codex_usage_cache["body"]:
-            return 200, {}, _codex_usage_cache["body"], _codex_usage_cache["dict"]
-        return 502, {}, json.dumps({"error": "Bad upstream response from Codex"}).encode(), None
+        return parsed
 
-    _codex_usage_cache["body"] = body
-    _codex_usage_cache["dict"] = parsed
-    _codex_usage_cache["at"] = now
-    return 200, {}, body, parsed
+    return _fetch_provider_usage(
+        _codex_usage_cache,
+        _CODEX_USAGE_TTL,
+        {
+            "name": "Codex",
+            "get_token": lambda: (_get_codex_token() or ("",))[0],
+            "refresh_token": lambda tok: _get_codex_token(force=True)[0],
+            "fetch": lambda tok: _fetch_codex(tok, _codex_token_cache["account_id"]),
+            "build": _build_with_daily,
+        },
+    )
 
 
 # ── OpenCode Go helpers ───────────────────────────────────────────────────────
@@ -589,101 +632,37 @@ def _build_opencode_go_dict(raw):
     }
 
 
-def _retry_after_seconds(headers, default=_OPENCODE_GO_USAGE_TTL):
-    raw = (headers or {}).get("Retry-After", "")
-    try:
-        secs = int(str(raw).strip())
-        if secs > 0:
-            return secs
-    except (ValueError, TypeError):
-        pass
-    return default
-
-
 def _fetch_opencode_go_usage():
     """Fetch OpenCode Go usage, update cache, and return (status, headers, body_bytes, parsed_dict)."""
-    now = time.monotonic()
-    if _opencode_go_usage_cache["body"] and now - _opencode_go_usage_cache["at"] < _OPENCODE_GO_USAGE_TTL:
-        return 200, {}, _opencode_go_usage_cache["body"], _opencode_go_usage_cache["dict"]
-
-    api_key = _get_opencode_go_key()
-    if not api_key:
-        if _opencode_go_usage_cache["body"]:
-            return 200, {}, _opencode_go_usage_cache["body"], _opencode_go_usage_cache["dict"]
-        return 503, {}, json.dumps({"error": "Could not read OpenCode Go API key"}).encode(), None
-
-    if now < _opencode_go_usage_cache["cooldown_until"]:
-        if _opencode_go_usage_cache["body"]:
-            return 200, {}, _opencode_go_usage_cache["body"], _opencode_go_usage_cache["dict"]
-        err_status = _opencode_go_usage_cache["last_error_status"] or 429
-        return err_status, {}, json.dumps({"error": f"OpenCode Go cooldown ({err_status})"}).encode(), None
-
-    try:
-        status, headers, raw = _fetch_opencode_go(api_key)
-    except Exception as e:
-        print(f"OpenCode Go fetch error: {e}", flush=True)
-        if _opencode_go_usage_cache["body"]:
-            return 200, {}, _opencode_go_usage_cache["body"], _opencode_go_usage_cache["dict"]
-        return 502, {}, json.dumps({"error": "OpenCode Go network error"}).encode(), None
-
-    if status == 401:
-        refreshed_key = _get_opencode_go_key(force=True)
-        if refreshed_key and refreshed_key != api_key:
-            try:
-                status, headers, raw = _fetch_opencode_go(refreshed_key)
-            except Exception as e:
-                print(f"OpenCode Go retry fetch error: {e}", flush=True)
-                if _opencode_go_usage_cache["body"]:
-                    return 200, {}, _opencode_go_usage_cache["body"], _opencode_go_usage_cache["dict"]
-                return 502, {}, json.dumps({"error": "OpenCode Go network error after key refresh"}).encode(), None
-
-    if status in (401, 403):
-        _opencode_go_usage_cache["cooldown_until"] = now + _OPENCODE_GO_AUTH_COOLDOWN
-        _opencode_go_usage_cache["last_error_status"] = status
-        return status, {}, json.dumps({"error": f"OpenCode Go auth error ({status})"}).encode(), None
-
-    if status == 429:
-        retry_after = headers.get("Retry-After", "")
-        _opencode_go_usage_cache["cooldown_until"] = now + _retry_after_seconds(headers)
-        _opencode_go_usage_cache["last_error_status"] = 429
-        body = raw or json.dumps({"error": "rate_limited"}).encode()
-        return 429, ({"Retry-After": retry_after} if retry_after else {}), body, None
-
-    if status != 200 or not raw:
-        if _opencode_go_usage_cache["body"]:
-            return 200, {}, _opencode_go_usage_cache["body"], _opencode_go_usage_cache["dict"]
-        return 502, {}, json.dumps({"error": f"OpenCode Go upstream {status}"}).encode(), None
-
-    try:
-        parsed = _build_opencode_go_dict(raw)
-        body = json.dumps(parsed).encode()
-    except Exception as e:
-        print(f"OpenCode Go parse error: {e}", flush=True)
-        if _opencode_go_usage_cache["body"]:
-            return 200, {}, _opencode_go_usage_cache["body"], _opencode_go_usage_cache["dict"]
-        return 502, {}, json.dumps({"error": "Bad upstream response from OpenCode Go"}).encode(), None
-
-    _opencode_go_usage_cache["body"] = body
-    _opencode_go_usage_cache["dict"] = parsed
-    _opencode_go_usage_cache["at"] = now
-    _opencode_go_usage_cache["cooldown_until"] = 0.0
-    _opencode_go_usage_cache["last_error_status"] = 0
-    return 200, {}, body, parsed
+    return _fetch_provider_usage(
+        _opencode_go_usage_cache,
+        _OPENCODE_GO_USAGE_TTL,
+        {
+            "name": "OpenCode Go",
+            "get_token": _get_opencode_go_key,
+            "refresh_token": lambda tok: _get_opencode_go_key(force=True),
+            "fetch": _fetch_opencode_go,
+            "build": _build_opencode_go_dict,
+        },
+    )
 
 
 # ── HTTP Request Handler ──────────────────────────────────────────────────────
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/health":
+        if self.path in ("/health", "/usage/health"):
             self._health()
-        elif self.path in ("/usage", "/claude-usage"):
-            self._claude_usage()
-        elif self.path == "/codex-usage":
-            self._codex_usage()
-        elif self.path == "/opencode-go-usage":
-            self._opencode_go_usage()
-        elif self.path == "/all-usage":
+        elif self.path in ("/usage/claude", "/claude-usage", "/usage"):
+            status, headers, body, _ = _fetch_claude_usage()
+            self._respond(status, body, headers=headers)
+        elif self.path in ("/usage/codex", "/codex-usage"):
+            status, headers, body, _ = _fetch_codex_usage()
+            self._respond(status, body, headers=headers)
+        elif self.path in ("/usage/opencode", "/opencode-go-usage"):
+            status, headers, body, _ = _fetch_opencode_go_usage()
+            self._respond(status, body, headers=headers)
+        elif self.path in ("/usage/all", "/all-usage"):
             self._all_usage()
         else:
             self.send_error(404)
@@ -714,18 +693,6 @@ class Handler(BaseHTTPRequestHandler):
                 "cache_age_s": opencode_go_age,
             },
         })
-
-    def _claude_usage(self):
-        status, headers, body, _ = _fetch_claude_usage()
-        self._respond(status, body, headers=headers)
-
-    def _codex_usage(self):
-        status, headers, body, _ = _fetch_codex_usage()
-        self._respond(status, body, headers=headers)
-
-    def _opencode_go_usage(self):
-        status, headers, body, _ = _fetch_opencode_go_usage()
-        self._respond(status, body, headers=headers)
 
     def _all_usage(self):
         # Fetch all configured providers (respecting their respective caches)
@@ -763,4 +730,6 @@ if __name__ == "__main__":
     _get_codex_token()      # warm Codex token cache
     _get_opencode_go_key()  # warm OpenCode Go key cache
     print(f"PyPortal usage proxy listening on {BIND_HOST}:{PORT}", flush=True)
-    HTTPServer((BIND_HOST, PORT), Handler).serve_forever()
+    server = ThreadingHTTPServer((BIND_HOST, PORT), Handler)
+    server.daemon_threads = True
+    server.serve_forever()

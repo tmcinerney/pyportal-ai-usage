@@ -18,7 +18,8 @@ from adafruit_bitmap_font import bitmap_font
 import adafruit_touchscreen
 from secrets import secrets
 
-USAGE_URL = secrets.get("proxy_url", "").rstrip("/") + "/all-usage"
+USAGE_URL = secrets.get("proxy_url", "").rstrip("/") + "/usage/all"
+REQ_TIMEOUT = 30  # seconds; a hung proxy must not freeze the app
 
 REFRESH_MIN  = 900
 REFRESH_MAX  = 14400
@@ -39,6 +40,7 @@ _VIEW_ORDER = (
     (VIEW_OPENCODE_GO, "opencode_go"),
 )
 CAROUSEL_SECS = 60
+SWIPE_MIN_PX  = 80
 
 W, H = 320, 240
 SCALE = 2
@@ -285,7 +287,7 @@ def _has_legacy_model_cache(payload):
 def fetch_usage(req):
     gc.collect()
     try:
-        r = req.get(USAGE_URL)
+        r = req.get(USAGE_URL, timeout=REQ_TIMEOUT)
         status = getattr(r, "status_code", 0)
         headers = getattr(r, "headers", {}) or {}
         data = r.json()
@@ -294,7 +296,8 @@ def fetch_usage(req):
         gc.collect()
 
         if status == 429:
-            msg = (data.get("error") or {}).get("message", "Rate limited")
+            err = data.get("error")
+            msg = err.get("message", "Rate limited") if isinstance(err, dict) else "Rate limited"
             print("Proxy:", msg, "retry after", _retry_after(headers), "s")
             return _rate_limited(headers, msg)
 
@@ -729,6 +732,41 @@ def _next_view(data, current_view):
     return views[0]
 
 
+def _prev_view(data, current_view):
+    views = _available_views(data)
+    if not views:
+        return current_view
+    if current_view in views:
+        return views[(views.index(current_view) - 1) % len(views)]
+    return views[-1]
+
+
+def _read_gesture(ts, first):
+    """Follow one press from contact to release and classify it.
+
+    Returns ("tap", (x, y)), ("swipe_left", (x, y)),
+    ("swipe_right", (x, y)), or None for a press that matches no gesture.
+    A horizontal displacement over SWIPE_MIN_PX with more X than Y movement is
+    a swipe; a short, quick press is a tap; anything else is ignored.
+    """
+    start = first
+    last = first
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 3.0:
+        p = ts.touch_point
+        if p is None:
+            break
+        last = p
+        time.sleep(0.02)
+    dx = last[0] - start[0]
+    dy = last[1] - start[1]
+    if abs(dx) >= SWIPE_MIN_PX and abs(dx) > abs(dy):
+        return ("swipe_left" if dx < 0 else "swipe_right", (start[0], start[1]))
+    if abs(dx) < SWIPE_MIN_PX and abs(dy) < SWIPE_MIN_PX and time.monotonic() - t0 < 0.6:
+        return ("tap", (start[0], start[1]))
+    return None
+
+
 def usage_screen(data, view_mode=VIEW_CLAUDE, stale=False):
     if not data:
         return error_screen("No data"), None
@@ -829,11 +867,11 @@ try:
     )
 
     while True:
-        touch_pt = None
+        gesture = None
         for _ in range(10):
             p = ts.touch_point
             if p:
-                touch_pt = p
+                gesture = _read_gesture(ts, p)
                 break
             time.sleep(0.1)
 
@@ -861,32 +899,34 @@ try:
                 last_carousel = now
 
         # Handle Touch or Scheduled Refresh
-        if touch_pt or due:
+        if gesture or due:
             if startup_wait:
                 continue
 
-            # Check if touch is a view toggle (body tap) vs manual refresh (top-right header tap)
+            # Swipes navigate views; a tap in the top-right header refreshes.
             is_manual_refresh = due
-            if touch_pt and not due:
-                x, y, _ = touch_pt
-                # Header right quadrant = manual refresh action
-                if y < 60 and x > 180:
-                    is_manual_refresh = True
-                else:
-                    # Tap body = instant view toggle
-                    if has_multiple:
+            if gesture and not due:
+                gtype, (gx, gy) = gesture
+                if gtype == "tap":
+                    # Header right quadrant = manual refresh action
+                    if gy < 60 and gx > 180:
+                        is_manual_refresh = True
+                elif has_multiple:
+                    # Swipe left = next view, swipe right = previous view
+                    if gtype == "swipe_left":
                         current_view = _next_view(last_usage, current_view)
-                        screen, age_lbl = usage_screen(last_usage, view_mode=current_view, stale=(now - last_refresh >= REFRESH_MIN))
-                        display.root_group = screen
-                        last_carousel = now
-                    while ts.touch_point:
-                        time.sleep(0.05)
+                    else:
+                        current_view = _prev_view(last_usage, current_view)
+                    screen, age_lbl = usage_screen(last_usage, view_mode=current_view, stale=(now - last_refresh >= REFRESH_MIN))
+                    display.root_group = screen
+                    last_carousel = now
+                if not is_manual_refresh:
                     continue
 
             if is_manual_refresh:
                 startup_wait_lbl = None
                 pixel[0] = (0, 0, 20)
-                if touch_pt and not due and now - last_refresh < MANUAL_REFRESH_MIN:
+                if gesture and not due and now - last_refresh < MANUAL_REFRESH_MIN:
                     wait = int(MANUAL_REFRESH_MIN - (now - last_refresh))
                     next_refresh_until = time.monotonic() + wait
                     screen, next_refresh_lbl = next_refresh_screen(wait)
@@ -895,7 +935,7 @@ try:
                     while ts.touch_point:
                         time.sleep(0.05)
                     continue
-                if touch_pt and age_lbl is not None:
+                if gesture and age_lbl is not None:
                     _set_right(age_lbl, "refreshing...")
                 elif age_lbl is None and rate_limit_lbl is None:
                     display.root_group = refreshing_screen()

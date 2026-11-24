@@ -8,7 +8,8 @@ for the [Adafruit PyPortal](https://www.adafruit.com/product/4116).
 The dashboard cycles between configured provider views and shows the limits
 available for each account: short-term, weekly, and monthly utilization, reset
 times, model-scoped Claude limits, Codex reset credits, and observed daily Codex
-usage. Tap the screen to switch views or request a refresh.
+usage. Swipe left or right to move between provider views; tap the top-right
+corner to request a refresh. Views also auto-cycle once a minute.
 
 ## How it works
 
@@ -40,18 +41,20 @@ temporary network failures.
 - Claude Code, Codex, and/or OpenCode Go configured on that computer
 - `mpremote` for USB deployment
 
-The checked-in `devenv` configuration provides Python, `mpremote`, `circup`, and
-the project dependencies. A regular Python virtual environment works too.
+- The checked-in `devenv` configuration provides Python, `mpremote`, `circup`, and
+  the project dependencies. A regular Python virtual environment works too.
 
 ## Quick start
 
-1. Install the host dependencies.
+1. Enter the development environment. It provides Python,
+   `mpremote`, `circup`, and the project dependencies.
 
    ```sh
-   python -m venv .venv
-   . .venv/bin/activate
-   pip install -r requirements.txt
+   devenv shell
    ```
+
+   A regular Python environment works too: create a virtualenv and
+   `pip install -r requirements.txt`.
 
 2. Create the device configuration.
 
@@ -133,11 +136,14 @@ Optional proxy settings:
 
 | Endpoint | Description |
 |---|---|
-| `GET /health` | Credential availability and cache ages |
-| `GET /claude-usage` | Normalized Claude usage |
-| `GET /codex-usage` | Normalized Codex usage |
-| `GET /opencode-go-usage` | Normalized OpenCode Go usage |
-| `GET /all-usage` | Combined payload used by the device |
+| `GET /usage/all` | Combined payload used by the device |
+| `GET /usage/claude` | Normalized Claude usage |
+| `GET /usage/codex` | Normalized Codex usage |
+| `GET /usage/opencode` | Normalized OpenCode Go usage |
+| `GET /usage/health` | Credential availability and cache ages (alias: `/health`) |
+
+Legacy paths (`/claude-usage`, `/codex-usage`, `/opencode-go-usage`,
+`/all-usage`, `/usage`) remain as aliases for compatibility.
 
 The proxy does not expose access tokens, refresh tokens, account IDs, or raw
 provider responses.
@@ -151,7 +157,9 @@ the data each one exposes.
 
 ## Development
 
-Run the host-side test suite and compile-check the CircuitPython source:
+Read [docs/DEVICE.md](docs/DEVICE.md) for device deployment, serial
+monitoring, and the REPL-recovery loop. Run the host-side test suite and
+compile-check the CircuitPython source:
 
 ```sh
 devenv shell -- python -m unittest discover -s tests

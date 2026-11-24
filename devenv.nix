@@ -12,6 +12,41 @@
   };
 
   scripts = {
+    # Tail device serial output and classify device state (exit code: 0 running, 1 at REPL, 2 silent, 3 crash)
+    watch.exec = ''
+      PORT="''${PYPORTAL_PORT:-}"
+      if [ -z "$PORT" ] || [ ! -e "$PORT" ]; then
+        PORT="$(ls /dev/cu.usbmodem* /dev/ttyACM* 2>/dev/null | head -n 1)"
+      fi
+      if [ -z "$PORT" ]; then
+        echo "No PyPortal serial port found"
+        exit 1
+      fi
+      python scripts/watch.py "$PORT" "''${WATCH_SECONDS:-30}"
+    '';
+
+    # Soft reload, then watch boot output and assert the app is running
+    verify.exec = ''
+      set -e
+      PORT="''${PYPORTAL_PORT:-}"
+      if [ -z "$PORT" ] || [ ! -e "$PORT" ]; then
+        PORT="$(ls /dev/cu.usbmodem* /dev/ttyACM* 2>/dev/null | head -n 1)"
+      fi
+      if [ -z "$PORT" ]; then
+        echo "No PyPortal serial port found"
+        exit 1
+      fi
+      python - "$PORT" <<'PY'
+import serial, sys, time
+s = serial.Serial(sys.argv[1], 115200, timeout=2)
+time.sleep(0.3)
+s.write(b'\x03\x03\x04')
+time.sleep(1)
+s.close()
+PY
+      watch
+    '';
+
     repl.exec = ''
       PORT="''${PYPORTAL_PORT:-}"
       if [ -z "$PORT" ] || [ ! -e "$PORT" ]; then
@@ -156,6 +191,8 @@ PY
     echo "  deploy-shared   — push shared boot.py"
     echo "  deploy-secrets  — push shared/secrets.py to device"
     echo "  reload          — soft reload device"
+    echo "  verify          — reload, watch serial, assert the app is running"
+    echo "  watch           — tail device serial and classify its state"
     echo "  repl            — open CircuitPython REPL"
     echo "  libs            — manage CircuitPython libraries (circup)"
     echo ""
