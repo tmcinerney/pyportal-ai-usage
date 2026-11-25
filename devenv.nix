@@ -147,6 +147,9 @@ PY
       fi
       echo "Pushing shared files..."
       mpremote connect "$PORT" cp shared/boot.py :/boot.py
+      if [ -f shared/settings.toml ]; then
+        mpremote connect "$PORT" cp shared/settings.toml :/settings.toml
+      fi
       echo "Done"
     '';
 
@@ -188,7 +191,7 @@ PY
   enterShell = ''
     echo "PyPortal dev environment"
     echo "  deploy <name>        — deploy a project via USB"
-    echo "  deploy-shared   — push shared boot.py"
+    echo "  deploy-shared   — push shared boot.py and settings.toml"
     echo "  deploy-secrets  — push shared/secrets.py to device"
     echo "  reload          — soft reload device"
     echo "  verify          — reload, watch serial, assert the app is running"

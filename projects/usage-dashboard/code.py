@@ -18,16 +18,36 @@ from adafruit_bitmap_font import bitmap_font
 import adafruit_touchscreen
 from secrets import secrets
 
-USAGE_URL = secrets.get("proxy_url", "").rstrip("/") + "/usage/all"
-REQ_TIMEOUT = 30  # seconds; a hung proxy must not freeze the app
+try:
+    import settings as device_settings
+except ImportError:
+    device_settings = {}
 
-REFRESH_MIN  = 900
-REFRESH_MAX  = 14400
+
+def _cfg(name, default):
+    """Read a tunable from /settings.toml with a code default."""
+    try:
+        value = device_settings.get(name)
+    except Exception:
+        value = None
+    if value is None:
+        return default
+    try:
+        return type(default)(value)
+    except (TypeError, ValueError):
+        return default
+
+
+USAGE_URL = secrets.get("proxy_url", "").rstrip("/") + "/usage/all"
+REQ_TIMEOUT = _cfg("USAGE_REQ_TIMEOUT", 30)  # seconds; a hung proxy must not freeze the app
+
+REFRESH_MIN  = _cfg("USAGE_REFRESH_MIN", 900)
+REFRESH_MAX  = _cfg("USAGE_REFRESH_MAX", 14400)
 REFRESH_STEPS = [900, 1800, 3600, 7200, 14400]
-RATE_LIMIT_FALLBACK = 3600
-STARTUP_GRACE = 300
-STARTUP_READY_GRACE = 15
-MANUAL_REFRESH_MIN = 900
+RATE_LIMIT_FALLBACK = _cfg("USAGE_RATE_LIMIT_FALLBACK", 3600)
+STARTUP_GRACE = _cfg("USAGE_STARTUP_GRACE", 300)
+STARTUP_READY_GRACE = _cfg("USAGE_STARTUP_READY_GRACE", 15)
+MANUAL_REFRESH_MIN = _cfg("USAGE_MANUAL_REFRESH_MIN", 900)
 STATE_FILE = "usage_state.json"
 USAGE_RETRY_KEY = "usage_retry_at"
 
@@ -39,8 +59,10 @@ _VIEW_ORDER = (
     (VIEW_CODEX, "codex"),
     (VIEW_OPENCODE_GO, "opencode_go"),
 )
-CAROUSEL_SECS = 60
-SWIPE_MIN_PX  = 80
+CAROUSEL_SECS = _cfg("USAGE_CAROUSEL_SECS", 60)
+SWIPE_MIN_PX  = _cfg("USAGE_SWIPE_MIN_PX", 80)
+SWIPE_TAP_MS  = _cfg("USAGE_SWIPE_TAP_MS", 600)
+SWIPE_HOLD_S  = _cfg("USAGE_SWIPE_HOLD_S", 3.0)
 
 W, H = 320, 240
 SCALE = 2
@@ -752,17 +774,24 @@ def _read_gesture(ts, first):
     start = first
     last = first
     t0 = time.monotonic()
-    while time.monotonic() - t0 < 3.0:
+    last_sample = t0
+    while time.monotonic() - t0 < SWIPE_HOLD_S:
         p = ts.touch_point
         if p is None:
             break
+        # Register the swipe as soon as the finger passes the threshold;
+        # no need to wait for release.
+        if p[0] - start[0] <= -SWIPE_MIN_PX:
+            return ("swipe_left", (start[0], start[1]))
+        if p[0] - start[0] >= SWIPE_MIN_PX:
+            return ("swipe_right", (start[0], start[1]))
         last = p
-        time.sleep(0.02)
+        if time.monotonic() - last_sample >= 0.04:
+            time.sleep(0.01)
+            last_sample = time.monotonic()
     dx = last[0] - start[0]
     dy = last[1] - start[1]
-    if abs(dx) >= SWIPE_MIN_PX and abs(dx) > abs(dy):
-        return ("swipe_left" if dx < 0 else "swipe_right", (start[0], start[1]))
-    if abs(dx) < SWIPE_MIN_PX and abs(dy) < SWIPE_MIN_PX and time.monotonic() - t0 < 0.6:
+    if abs(dx) < SWIPE_MIN_PX and abs(dy) < SWIPE_MIN_PX and time.monotonic() - t0 < SWIPE_TAP_MS / 1000:
         return ("tap", (start[0], start[1]))
     return None
 
@@ -1024,14 +1053,6 @@ try:
             else:
                 next_refresh_lbl.text = "Next refresh in " + _fmt_wait(wait)
 
-except KeyboardInterrupt:
-    # A stray serial interrupt (port open/close, DTR transition, tooling)
-    # must not exit the app to the REPL. Resume the main loop.
-    print("Serial interrupt ignored; continuing")
-    try:
-        supervisor.reload()
-    except Exception:
-        pass
 except Exception as e:
     print("Fatal:", e)
     try:

@@ -1,0 +1,16 @@
+# Copy this to /settings.toml on the device (CIRCUITPY drive).
+# Optional: every key may be omitted; the device falls back to the
+# code defaults shown here.
+CIRCUITPY_MDNS_HOSTNAME = "pyportal"
+
+USAGE_SWIPE_MIN_PX = 80
+USAGE_SWIPE_TAP_MS = 600
+USAGE_SWIPE_HOLD_S = 3.0
+USAGE_CAROUSEL_SECS = 60
+USAGE_REFRESH_MIN = 900
+USAGE_REFRESH_MAX = 14400
+USAGE_RATE_LIMIT_FALLBACK = 3600
+USAGE_STARTUP_GRACE = 300
+USAGE_STARTUP_READY_GRACE = 15
+USAGE_MANUAL_REFRESH_MIN = 900
+USAGE_REQ_TIMEOUT = 30

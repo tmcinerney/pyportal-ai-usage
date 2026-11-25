@@ -60,11 +60,30 @@ temporary network failures.
 
    ```sh
    cp shared/secrets.py.example shared/secrets.py
+   cp shared/settings.toml.example /Volumes/CIRCUITPY/settings.toml
    ```
 
    Fill in the Wi-Fi credentials and set `proxy_url` to the LAN address of the
    computer that will run the proxy, for example `http://192.168.1.20:9292`.
-   The real file is ignored by Git.
+   The real secrets file is ignored by Git. The `settings.toml` keys are
+   optional behavior tunables (swipe sensitivity, carousel duration, refresh
+   intervals); every one can be omitted and the device uses the defaults.
+
+   Available tunables (defaults shown):
+
+   | Key | Default | Purpose |
+   |---|---|---|
+   | `USAGE_SWIPE_MIN_PX` | `80` | Horizontal pixels before a drag counts as a swipe |
+   | `USAGE_SWIPE_TAP_MS` | `600` | Max press duration that counts as a tap |
+   | `USAGE_SWIPE_HOLD_S` | `3.0` | Give-up time for an unreadable press |
+   | `USAGE_CAROUSEL_SECS` | `60` | Seconds per provider view before auto-advance |
+   | `USAGE_REFRESH_MIN` | `900` | Minimum seconds between scheduled fetches |
+   | `USAGE_REFRESH_MAX` | `14400` | Backoff ceiling after repeated failures |
+   | `USAGE_RATE_LIMIT_FALLBACK` | `3600` | Default 429 cooldown when the proxy sends none |
+   | `USAGE_STARTUP_GRACE` | `300` | Fetch delay at boot when time sync fails |
+   | `USAGE_STARTUP_READY_GRACE` | `15` | Fetch delay at boot after time sync |
+   | `USAGE_MANUAL_REFRESH_MIN` | `900` | Minimum seconds between tap-requested refreshes |
+   | `USAGE_REQ_TIMEOUT` | `30` | HTTP timeout for proxy fetches |
 
 3. Start the proxy.
 
