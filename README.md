@@ -164,13 +164,6 @@ Optional proxy settings:
 The proxy does not expose access tokens, refresh tokens, account IDs, or raw
 provider responses.
 
-## Screen layout
-
-The display uses the same visual structure across providers while adapting to
-the data each one exposes.
-
-![Claude and Codex screen layout](docs/mockups/usage-dashboard-concept.png)
-
 ## Development
 
 Read [docs/DEVICE.md](docs/DEVICE.md) for device deployment, serial
