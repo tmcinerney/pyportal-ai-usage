@@ -115,3 +115,26 @@ On a healthy device, checked via `mpremote resume exec`:
   ```
 
   Compare the value against the host clock.
+
+## Verifying what is on the screen
+
+CircuitPython cannot read the framebuffer back, but the app's display is a
+`displayio` scene graph that can be walked. The app watches for the byte `d`
+on serial: on receipt it writes its live scene (positions, bar bitmaps as
+run-length data, palettes, label text and colors) to `/dump_display.json`.
+The host tool checks the app is running, sends the trigger, waits for the
+`display dumped` ack, remounts the `CIRCUITPY` volume (mass storage shows a
+boot-time snapshot, so a remount is needed to see files the app wrote), and
+reconstructs a 320x240 PNG:
+
+```sh
+devenv shell -- screenshot
+```
+
+It prints every label with its position and color, so a change can be
+verified as data — for example, that a title renders in the expected
+accent color, or that a bar's filled cells match its printed percentage.
+End to end it takes roughly ten seconds. The PNG lands in
+`/tmp/device_screenshot.png`. The dump only works while the app runs;
+sent at the REPL the byte would just raise a NameError, which is why the
+tool probes for the running state first.

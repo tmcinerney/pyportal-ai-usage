@@ -13,6 +13,19 @@
 
   scripts = {
     # Tail device serial output and classify device state (exit code: 0 running, 1 at REPL, 2 silent, 3 crash)
+    # Reconstruct the live device screen as a PNG for change verification
+    screenshot.exec = ''
+      PORT="''${PYPORTAL_PORT:-}"
+      if [ -z "$PORT" ] || [ ! -e "$PORT" ]; then
+        PORT="$(ls /dev/cu.usbmodem* /dev/ttyACM* 2>/dev/null | head -n 1)"
+      fi
+      if [ -z "$PORT" ]; then
+        echo "No PyPortal serial port found"
+        exit 1
+      fi
+      python scripts/screenshot.py "$PORT"
+    '';
+
     watch.exec = ''
       PORT="''${PYPORTAL_PORT:-}"
       if [ -z "$PORT" ] || [ ! -e "$PORT" ]; then
@@ -196,6 +209,7 @@ PY
     echo "  reload          — soft reload device"
     echo "  verify          — reload, watch serial, assert the app is running"
     echo "  watch           — tail device serial and classify its state"
+    echo "  screenshot      — reconstruct the live screen as a PNG with label/color summary"
     echo "  repl            — open CircuitPython REPL"
     echo "  libs            — manage CircuitPython libraries (circup)"
     echo ""

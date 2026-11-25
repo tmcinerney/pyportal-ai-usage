@@ -1,5 +1,6 @@
 import gc
 import json
+import sys
 import time
 import board
 import displayio
@@ -895,8 +896,95 @@ try:
         size=(320, 240),
     )
 
+    def _dump_display():
+        """Debug: write the live scene graph to /dump_display.json. The host
+        screenshot tool (scripts/screenshot.py) reconstructs a PNG from it.
+        Triggered by the byte 'd' on serial; harmless otherwise."""
+        try:
+            import json as _json
+            f = open("/dump_display.json", "w")
+            f.write("[")
+            first = [True]
+
+            def emit(item):
+                if not first[0]:
+                    f.write(",")
+                first[0] = False
+                f.write(_json.dumps(item))
+                gc.collect()
+
+            def walk(node, x=0, y=0):
+                kind = type(node).__name__
+                try:
+                    nx = x + node.x
+                    ny = y + node.y
+                except Exception:
+                    nx, ny = x, y
+                if kind == "Group":
+                    for child in node:
+                        walk(child, nx, ny)
+                    return
+                item = {"kind": kind, "x": nx, "y": ny}
+                bmp = getattr(node, "bitmap", None)
+                if bmp is not None:
+                    pal = getattr(node, "pixel_shader", None)
+                    w, h = bmp.width, bmp.height
+                    # Run-length encode cells row-by-row to keep memory flat.
+                    rle = []
+                    prev = None
+                    run = 0
+                    for cy in range(h):
+                        for cx in range(w):
+                            v = int(bmp[cy * w + cx])
+                            if v == prev:
+                                run += 1
+                            else:
+                                if prev is not None:
+                                    rle.append([prev, run])
+                                prev = v
+                                run = 1
+                    if prev is not None:
+                        rle.append([prev, run])
+                    item["w"] = w
+                    item["h"] = h
+                    item["rle"] = rle
+                    try:
+                        colors = []
+                        for i in range(len(pal)):
+                            c = int(pal[i])
+                            colors.append([((c >> 16) & 255), ((c >> 8) & 255), (c & 255)])
+                        item["palette"] = colors
+                    except Exception:
+                        pass
+                if kind == "Label":
+                    try:
+                        item["text"] = node.text
+                        c = int(node.color)
+                        item["color"] = [((c >> 16) & 255), ((c >> 8) & 255), (c & 255)]
+                    except Exception:
+                        pass
+                emit(item)
+
+            walk(display.root_group)
+            f.write("]")
+            f.close()
+            print("display dumped")
+        except Exception as e:
+            print("dump error:", e)
+
     while True:
         gesture = None
+        dbg = None
+        try:
+            import supervisor as _sup
+            if _sup.runtime.serial_bytes_available:
+                dbg = sys.stdin.read(1)
+        except Exception:
+            dbg = None
+        if dbg == "d":
+            _dump_display()
+            gesture = None
+            continue
         for _ in range(10):
             p = ts.touch_point
             if p:
